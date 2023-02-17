@@ -44,14 +44,10 @@ func (p *Plugin) SetLogger(log hclog.Logger) {
 func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestRequest) (*workloadattestorv1.AttestResponse, error) {
 
 	var log hclog.Logger
-	fmt.Printf("req.SaName: %v\n", req.SaName)
-	fmt.Printf("req.Pid: %v\n", req.Pid)
 
 	for attempt := 1; ; attempt++ {
 
 		log = log.With(telemetry.Attempt, attempt)
-
-		fmt.Printf("attempt: %v\n", attempt)
 
 		var attestResponse *workloadattestorv1.AttestResponse
 		pods := GetPodsFromK8sClient()
