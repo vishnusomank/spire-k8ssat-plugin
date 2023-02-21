@@ -2,7 +2,11 @@ module github.com/vishnusomank/spire-k8ssat-plugin
 
 go 1.19
 
-require github.com/spiffe/spire-plugin-sdk v1.5.5
+require (
+	github.com/golang-jwt/jwt v3.2.2+incompatible
+	github.com/spiffe/spire-plugin-sdk v1.5.5
+	k8s.io/apimachinery v0.26.1
+)
 
 require (
 	github.com/DataDog/datadog-go v3.2.0+incompatible // indirect
@@ -54,7 +58,6 @@ require (
 	gopkg.in/square/go-jose.v2 v2.6.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	k8s.io/apimachinery v0.26.1 // indirect
 	k8s.io/klog/v2 v2.80.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20221012153701-172d655c2280 // indirect
 	k8s.io/utils v0.0.0-20221128185143-99ec85e7a448 // indirect
@@ -67,7 +70,7 @@ require (
 	github.com/andres-erbsen/clock v0.0.0-20160526145045-9e14626cd129
 	github.com/fatih/color v1.13.0 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
-	github.com/hashicorp/go-hclog v1.4.0 // indirect
+	github.com/hashicorp/go-hclog v1.4.0
 	github.com/hashicorp/go-plugin v1.4.8 // indirect
 	github.com/hashicorp/yamux v0.0.0-20181012175058-2f1d1f20f75d // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
@@ -81,7 +84,7 @@ require (
 	golang.org/x/sys v0.5.0 // indirect
 	golang.org/x/text v0.7.0 // indirect
 	google.golang.org/genproto v0.0.0-20230110181048-76db0878b65f // indirect
-	google.golang.org/grpc v1.53.0 // indirect
+	google.golang.org/grpc v1.53.0
 	google.golang.org/protobuf v1.28.1 // indirect
 	k8s.io/api v0.26.1
 	k8s.io/client-go v0.26.1

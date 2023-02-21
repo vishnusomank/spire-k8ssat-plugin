@@ -1,23 +1,23 @@
-package k8ssat
+package main
 
 import (
 	"context"
 	"fmt"
-	"strconv"
+	"sync"
 	"time"
 
 	"github.com/andres-erbsen/clock"
+	"github.com/golang-jwt/jwt"
 	"github.com/hashicorp/go-hclog"
-	"github.com/spiffe/spire/pkg/common/telemetry"
+	"github.com/spiffe/spire-plugin-sdk/pluginmain"
 	workloadattestorv1 "github.com/vishnusomank/spire-plugin-sdk/proto/spire/plugin/agent/workloadattestor/v1"
 	configv1 "github.com/vishnusomank/spire-plugin-sdk/proto/spire/service/common/config/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	corev1 "k8s.io/api/core/v1"
 )
 
 const (
-	pluginName               = "k8s_sat"
+	pluginName               = "k8sw_sat"
 	defaultMaxPollAttempts   = 60
 	defaultPollRetryInterval = time.Millisecond * 500
 	defaultReloadInterval    = time.Minute
@@ -29,6 +29,7 @@ type Plugin struct {
 
 	log   hclog.Logger
 	clock clock.Clock
+	mtx   sync.RWMutex
 }
 
 func New() *Plugin {
@@ -45,39 +46,30 @@ func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestReque
 
 	var log hclog.Logger
 
+	p.mtx.RLock()
+	defer p.mtx.RUnlock()
+
+	if req.Meta == nil {
+		fmt.Println("using default SA Token")
+		req.Meta = map[string]string{
+			"sa_token": defaultSAToken,
+		}
+	}
+	fmt.Printf("req.Meta: %v\n", req.Meta)
+
 	for attempt := 1; ; attempt++ {
 
-		log = log.With(telemetry.Attempt, attempt)
+		//log = log.With(telemetry.Attempt, attempt)
+
+		var selectorValues []string
 
 		var attestResponse *workloadattestorv1.AttestResponse
-		pods := GetPodsFromK8sClient()
-		fmt.Printf("pods: %v\n", pods.Items)
-		for _, pod := range pods.Items {
-			fmt.Printf("attempt: %v\n", attempt)
-			fmt.Printf("pod.Name: %v\n", pod.Name)
-			item := pod
+		token := req.Meta["sa_token"]
+		selectorValues = append(selectorValues, getSelectorValuesFromToken(token)...)
 
-			podKnown := pod.UID != ""
-
-			var selectorValues []string
-
-			if podKnown {
-				// The workload container was not found (i.e. not ready yet?)
-				// but the pod is known. If container selectors have been
-				// disabled, then allow the pod selectors to be used.
-				selectorValues = append(selectorValues, getSelectorValuesFromPodInfo(&item)...)
-			}
-
-			if len(selectorValues) > 0 {
-				if attestResponse != nil {
-					log.Warn("Two pods found with same container Id")
-					return nil, status.Error(codes.Internal, "two pods found with same container Id")
-				}
-				attestResponse = &workloadattestorv1.AttestResponse{SelectorValues: selectorValues}
-			}
+		if len(selectorValues) > 0 {
+			attestResponse = &workloadattestorv1.AttestResponse{SelectorValues: selectorValues}
 		}
-
-		fmt.Printf("attestResponse.SelectorValues: %v\n", attestResponse.SelectorValues)
 
 		if attestResponse != nil {
 			return attestResponse, nil
@@ -85,12 +77,9 @@ func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestReque
 
 		// if the container was not located after the maximum number of attempts then the search is over.
 		if attempt >= defaultMaxPollAttempts {
-			log.Warn("Container id not found; giving up")
+			log.Warn("Decoding failed; giving up")
 			return nil, status.Error(codes.DeadlineExceeded, "no selectors found after max poll attempts")
 		}
-
-		// wait a bit for containers to initialize before trying again.
-		log.Warn("Container id not found", telemetry.RetryInterval, defaultPollRetryInterval)
 
 		select {
 		case <-p.clock.After(defaultPollRetryInterval):
@@ -98,63 +87,38 @@ func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestReque
 			return nil, status.Errorf(codes.Canceled, "no selectors found: %v", ctx.Err())
 		}
 	}
+
 }
 
 func (p *Plugin) Configure(ctx context.Context, req *configv1.ConfigureRequest) (resp *configv1.ConfigureResponse, err error) {
 	return &configv1.ConfigureResponse{}, nil
 }
 
-func getPodImageIdentifiers(containerStatuses ...corev1.ContainerStatus) map[string]struct{} {
-	// Map is used purely to exclude duplicate selectors, value is unused.
-	podImages := make(map[string]struct{})
-	// Note that for each pod image we generate *2* matching selectors.
-	// This is to support matching against ImageID, which has a SHA
-	// docker.io/envoyproxy/envoy-alpine@sha256:bf862e5f5eca0a73e7e538224578c5cf867ce2be91b5eaed22afc153c00363eb
-	// as well as
-	// docker.io/envoyproxy/envoy-alpine:v1.16.0, which does not,
-	// while also maintaining backwards compatibility and allowing for dynamic workload registration (k8s operator)
-	// when the SHA is not yet known (e.g. before the image pull is initiated at workload creation time)
-	// More info here: https://github.com/spiffe/spire/issues/2026
-	for _, containerStatus := range containerStatuses {
-		podImages[containerStatus.ImageID] = struct{}{}
-		podImages[containerStatus.Image] = struct{}{}
-	}
-	return podImages
-}
+func getSelectorValuesFromToken(token string) []string {
 
-func getSelectorValuesFromPodInfo(pod *corev1.Pod) []string {
+	tokenMap, _, err := new(jwt.Parser).ParseUnverified(token, jwt.MapClaims{})
+	if err != nil {
+		fmt.Printf("Error parsing token: %v", err)
+		return []string{}
+	}
+	saAndNs := tokenMap.Claims.(jwt.MapClaims)["kubernetes.io"].(map[string]interface{})
+	namespace := saAndNs["namespace"]
+	saName := saAndNs["serviceaccount"].(map[string]interface{})["name"]
+
 	selectorValues := []string{
-		fmt.Sprintf("sa:%s", pod.Spec.ServiceAccountName),
-		fmt.Sprintf("ns:%s", pod.Namespace),
-		fmt.Sprintf("node-name:%s", pod.Spec.NodeName),
-		fmt.Sprintf("pod-uid:%s", pod.UID),
-		fmt.Sprintf("pod-name:%s", pod.Name),
-		fmt.Sprintf("pod-image-count:%s", strconv.Itoa(len(pod.Status.ContainerStatuses))),
-		fmt.Sprintf("pod-init-image-count:%s", strconv.Itoa(len(pod.Status.InitContainerStatuses))),
-	}
-
-	for podImage := range getPodImageIdentifiers(pod.Status.ContainerStatuses...) {
-		selectorValues = append(selectorValues, fmt.Sprintf("pod-image:%s", podImage))
-	}
-	for podInitImage := range getPodImageIdentifiers(pod.Status.InitContainerStatuses...) {
-		selectorValues = append(selectorValues, fmt.Sprintf("pod-init-image:%s", podInitImage))
-	}
-
-	for k, v := range pod.Labels {
-		selectorValues = append(selectorValues, fmt.Sprintf("pod-label:%s:%s", k, v))
-	}
-	for _, ownerReference := range pod.OwnerReferences {
-		selectorValues = append(selectorValues, fmt.Sprintf("pod-owner:%s:%s", ownerReference.Kind, ownerReference.Name))
-		selectorValues = append(selectorValues, fmt.Sprintf("pod-owner-uid:%s:%s", ownerReference.Kind, ownerReference.UID))
+		fmt.Sprintf("sa:%s", saName),
+		fmt.Sprintf("ns:%s", namespace),
 	}
 
 	return selectorValues
 }
-
-func getSelectorValuesFromWorkloadContainerStatus(status *corev1.ContainerStatus) []string {
-	selectorValues := []string{fmt.Sprintf("container-name:%s", status.Name)}
-	for containerImage := range getPodImageIdentifiers(*status) {
-		selectorValues = append(selectorValues, fmt.Sprintf("container-image:%s", containerImage))
-	}
-	return selectorValues
+func main() {
+	plugin := new(Plugin)
+	// Serve the plugin. This function call will not return. If there is a
+	// failure to serve, the process will exit with a non-zero exit code.
+	pluginmain.Serve(
+		workloadattestorv1.WorkloadAttestorPluginServer(plugin),
+		// TODO: Remove if no configuration is required
+		configv1.ConfigServiceServer(plugin),
+	)
 }
