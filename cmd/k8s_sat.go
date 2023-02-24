@@ -3,12 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"sync"
+	"strings"
 	"time"
 
 	"github.com/andres-erbsen/clock"
 	"github.com/hashicorp/go-hclog"
 	"github.com/spiffe/spire-plugin-sdk/pluginmain"
+	"github.com/spiffe/spire/pkg/common/telemetry"
 	workloadattestorv1 "github.com/vishnusomank/spire-plugin-sdk/proto/spire/plugin/agent/workloadattestor/v1"
 	configv1 "github.com/vishnusomank/spire-plugin-sdk/proto/spire/service/common/config/v1"
 	"google.golang.org/grpc/codes"
@@ -19,7 +20,7 @@ import (
 const (
 	pluginName               = "k8sw_sat"
 	defaultMaxPollAttempts   = 60
-	defaultPollRetryInterval = time.Second * 30
+	defaultPollRetryInterval = time.Second * 5
 	defaultReloadInterval    = time.Minute
 )
 
@@ -29,7 +30,6 @@ type Plugin struct {
 
 	log    hclog.Logger
 	clock  clock.Clock
-	mtx    sync.RWMutex
 	client *kubernetes.Clientset
 }
 
@@ -48,33 +48,33 @@ func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestReque
 	p.client = ConnectK8sClient()
 
 	if p.client == nil {
-		return nil, fmt.Errorf("could not connect to k8s")
+		return &workloadattestorv1.AttestResponse{}, fmt.Errorf("could not connect to k8s")
 	}
 
-	var log hclog.Logger
-
-	p.mtx.RLock()
-	defer p.mtx.RUnlock()
-
-	if req.Meta == nil {
-		fmt.Println("using default SA Token")
-		req.Meta = map[string]string{
-			"sa_token": defaultSAToken,
-		}
-	}
-	fmt.Printf("req.Meta plugin: %v\n", req.Meta)
+	log := p.log.With(
+		telemetry.Details, req.Meta,
+	)
 
 	for attempt := 1; ; attempt++ {
 
-		//log = log.With(telemetry.Attempt, attempt)
-
+		log = log.With(telemetry.Attempt, attempt)
 		var selectorValues []string
 
 		var attestResponse *workloadattestorv1.AttestResponse
-		token := req.Meta["sa_token"]
+		token, ok := req.Meta["sa_token"]
+		if !ok {
+			return &workloadattestorv1.AttestResponse{}, nil
+		}
 
 		fmt.Printf("token: %v\n", token)
-		selectorValues = append(selectorValues, p.validateServiceAccountToken(token)...)
+		selectors, err := p.validateServiceAccountToken(token, log)
+		if err != nil {
+			if strings.Contains(err.Error(), "tokenReview failed") {
+				return &workloadattestorv1.AttestResponse{}, nil
+			}
+			return &workloadattestorv1.AttestResponse{}, err
+		}
+		selectorValues = append(selectorValues, selectors...)
 
 		if len(selectorValues) > 0 {
 			attestResponse = &workloadattestorv1.AttestResponse{SelectorValues: selectorValues}

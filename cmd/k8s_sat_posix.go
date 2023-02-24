@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/golang-jwt/jwt"
+	"github.com/hashicorp/go-hclog"
 	"github.com/rs/zerolog/log"
 	review "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -120,19 +121,18 @@ func ConnectInClusterAPIClient() *kubernetes.Clientset {
 	}
 }
 
-var defaultSAToken = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImRUcVFNWVQ0YlM4b0dORnh0QVpmbER6Y3QwRTVGWWdUeWlDRkpkUURKTUUifQ.eyJhdWQiOlsiaHR0cHM6Ly9rdWJlcm5ldGVzLmRlZmF1bHQuc3ZjLmNsdXN0ZXIubG9jYWwiLCJrM3MiXSwiZXhwIjoxNzA4MTA2MTQ4LCJpYXQiOjE2NzY1NzAxNDgsImlzcyI6Imh0dHBzOi8va3ViZXJuZXRlcy5kZWZhdWx0LnN2Yy5jbHVzdGVyLmxvY2FsIiwia3ViZXJuZXRlcy5pbyI6eyJuYW1lc3BhY2UiOiJkZWZhdWx0IiwicG9kIjp7Im5hbWUiOiJzaCIsInVpZCI6IjRhZjNmMWJhLTZmOTMtNGZlMS1iMzA0LWFhNDBiOWRlODNmZCJ9LCJzZXJ2aWNlYWNjb3VudCI6eyJuYW1lIjoiZGVmYXVsdCIsInVpZCI6IjQ1MGQyZWRmLTVmYTYtNGY1Yi05MDJhLTVlNzUyZWY4ZGM2YiJ9LCJ3YXJuYWZ0ZXIiOjE2NzY1NzM3NTV9LCJuYmYiOjE2NzY1NzAxNDgsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpkZWZhdWx0OmRlZmF1bHQifQ.Eu9Gl2mWRbJ_RUDha-sSkI3s9SYPHYxUF1H8B2qrkbuUksYdM5uTKfpdtUfAr4CN6E_SY6NbOrZUln_XabgIsweG0qOH2yEdOXITVBX_0gidjvt2eRvQOXu-PnQVaYT_XODO2ggdAwUoIoAUvXdWjTBaYdPkVjqZe0_VvWi2jRh1KyJcivyOGdF2S_SZ9s5vcbH40fydW-MsbdhZjLR-VckeSX_YJGJkgtHnOjTMDkOA7mwJ0Yz17I-xQQ-hsgCLd7VB8-hXC4RmJQtOeqZInDXNMOmQVljhdm6Nmu4vLfMtPkWZpue9PnT2vcjO9FhLUwlpZEcCaDN3tQG88q2ypA"
-
-func (p *Plugin) getSelectorValuesFromPodName(podName, podNs string) []string {
+func (p *Plugin) getSelectorValuesFromPodName(podName, podNs string, log hclog.Logger) ([]string, error) {
 
 	if podName == "" {
-		return nil
+		log.Warn("pod name is empty")
+		return nil, fmt.Errorf("pod name is empty")
 	}
 	var selectorValues []string
 
 	pod, err := p.client.CoreV1().Pods(podNs).Get(context.Background(), podName, metav1.GetOptions{})
 	if err != nil {
-		log.Error().Msg(err.Error())
-		return nil
+		log.Warn("get pod error ", err)
+		return nil, err
 	}
 
 	if pod.Name == podName {
@@ -147,10 +147,15 @@ func (p *Plugin) getSelectorValuesFromPodName(podName, podNs string) []string {
 		}
 	}
 
-	return selectorValues
+	return selectorValues, nil
 }
 
-func (p *Plugin) validateServiceAccountToken(token string) []string {
+func (p *Plugin) validateServiceAccountToken(token string, log hclog.Logger) ([]string, error) {
+
+	if token == "" {
+		log.Warn("empty token")
+		return nil, fmt.Errorf("empty token received ")
+	}
 	var podName string
 
 	result, err := p.client.AuthenticationV1().TokenReviews().Create(context.Background(), &review.TokenReview{
@@ -160,7 +165,8 @@ func (p *Plugin) validateServiceAccountToken(token string) []string {
 	}, metav1.CreateOptions{})
 
 	if err != nil || !result.Status.Authenticated {
-		return nil
+		log.Warn("tokenReview failed: ", err)
+		return nil, fmt.Errorf("tokenReview failed")
 	}
 
 	for key, value := range result.Status.User.Extra {
@@ -172,11 +178,12 @@ func (p *Plugin) validateServiceAccountToken(token string) []string {
 
 	jwtToken, _, err := new(jwt.Parser).ParseUnverified(token, jwt.MapClaims{})
 	if err != nil {
-		return nil
+		log.Warn("token decoding failed ", err)
+		return nil, err
 	}
 	kubernetesMap := jwtToken.Claims.(jwt.MapClaims)["kubernetes.io"].(map[string]interface{})
 
 	podNs := kubernetesMap["namespace"].(string)
 
-	return p.getSelectorValuesFromPodName(podName, podNs)
+	return p.getSelectorValuesFromPodName(podName, podNs, log)
 }
