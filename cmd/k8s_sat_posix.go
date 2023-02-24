@@ -2,26 +2,24 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
-	"io/ioutil"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/golang-jwt/jwt"
 	"github.com/rs/zerolog/log"
-	v1 "k8s.io/api/core/v1"
+	review "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	rest "k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 var parsed bool = false
 var kubeconfig *string
-
-var defaultSAToken = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImRUcVFNWVQ0YlM4b0dORnh0QVpmbER6Y3QwRTVGWWdUeWlDRkpkUURKTUUifQ.eyJhdWQiOlsiaHR0cHM6Ly9rdWJlcm5ldGVzLmRlZmF1bHQuc3ZjLmNsdXN0ZXIubG9jYWwiLCJrM3MiXSwiZXhwIjoxNzA4MTA2MTQ4LCJpYXQiOjE2NzY1NzAxNDgsImlzcyI6Imh0dHBzOi8va3ViZXJuZXRlcy5kZWZhdWx0LnN2Yy5jbHVzdGVyLmxvY2FsIiwia3ViZXJuZXRlcy5pbyI6eyJuYW1lc3BhY2UiOiJkZWZhdWx0IiwicG9kIjp7Im5hbWUiOiJzaCIsInVpZCI6IjRhZjNmMWJhLTZmOTMtNGZlMS1iMzA0LWFhNDBiOWRlODNmZCJ9LCJzZXJ2aWNlYWNjb3VudCI6eyJuYW1lIjoiZGVmYXVsdCIsInVpZCI6IjQ1MGQyZWRmLTVmYTYtNGY1Yi05MDJhLTVlNzUyZWY4ZGM2YiJ9LCJ3YXJuYWZ0ZXIiOjE2NzY1NzM3NTV9LCJuYmYiOjE2NzY1NzAxNDgsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpkZWZhdWx0OmRlZmF1bHQifQ.Eu9Gl2mWRbJ_RUDha-sSkI3s9SYPHYxUF1H8B2qrkbuUksYdM5uTKfpdtUfAr4CN6E_SY6NbOrZUln_XabgIsweG0qOH2yEdOXITVBX_0gidjvt2eRvQOXu-PnQVaYT_XODO2ggdAwUoIoAUvXdWjTBaYdPkVjqZe0_VvWi2jRh1KyJcivyOGdF2S_SZ9s5vcbH40fydW-MsbdhZjLR-VckeSX_YJGJkgtHnOjTMDkOA7mwJ0Yz17I-xQQ-hsgCLd7VB8-hXC4RmJQtOeqZInDXNMOmQVljhdm6Nmu4vLfMtPkWZpue9PnT2vcjO9FhLUwlpZEcCaDN3tQG88q2ypA"
 
 func isInCluster() bool {
 	if _, ok := os.LookupEnv("KUBERNETES_PORT"); ok {
@@ -97,7 +95,7 @@ func ConnectInClusterAPIClient() *kubernetes.Clientset {
 		port = "6443"
 	}
 
-	read, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	read, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
 	if err != nil {
 		log.Error().Msg(err.Error())
 		return nil
@@ -122,116 +120,63 @@ func ConnectInClusterAPIClient() *kubernetes.Clientset {
 	}
 }
 
-// =============== //
-// == Namespace == //
-// =============== //
+var defaultSAToken = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImRUcVFNWVQ0YlM4b0dORnh0QVpmbER6Y3QwRTVGWWdUeWlDRkpkUURKTUUifQ.eyJhdWQiOlsiaHR0cHM6Ly9rdWJlcm5ldGVzLmRlZmF1bHQuc3ZjLmNsdXN0ZXIubG9jYWwiLCJrM3MiXSwiZXhwIjoxNzA4MTA2MTQ4LCJpYXQiOjE2NzY1NzAxNDgsImlzcyI6Imh0dHBzOi8va3ViZXJuZXRlcy5kZWZhdWx0LnN2Yy5jbHVzdGVyLmxvY2FsIiwia3ViZXJuZXRlcy5pbyI6eyJuYW1lc3BhY2UiOiJkZWZhdWx0IiwicG9kIjp7Im5hbWUiOiJzaCIsInVpZCI6IjRhZjNmMWJhLTZmOTMtNGZlMS1iMzA0LWFhNDBiOWRlODNmZCJ9LCJzZXJ2aWNlYWNjb3VudCI6eyJuYW1lIjoiZGVmYXVsdCIsInVpZCI6IjQ1MGQyZWRmLTVmYTYtNGY1Yi05MDJhLTVlNzUyZWY4ZGM2YiJ9LCJ3YXJuYWZ0ZXIiOjE2NzY1NzM3NTV9LCJuYmYiOjE2NzY1NzAxNDgsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpkZWZhdWx0OmRlZmF1bHQifQ.Eu9Gl2mWRbJ_RUDha-sSkI3s9SYPHYxUF1H8B2qrkbuUksYdM5uTKfpdtUfAr4CN6E_SY6NbOrZUln_XabgIsweG0qOH2yEdOXITVBX_0gidjvt2eRvQOXu-PnQVaYT_XODO2ggdAwUoIoAUvXdWjTBaYdPkVjqZe0_VvWi2jRh1KyJcivyOGdF2S_SZ9s5vcbH40fydW-MsbdhZjLR-VckeSX_YJGJkgtHnOjTMDkOA7mwJ0Yz17I-xQQ-hsgCLd7VB8-hXC4RmJQtOeqZInDXNMOmQVljhdm6Nmu4vLfMtPkWZpue9PnT2vcjO9FhLUwlpZEcCaDN3tQG88q2ypA"
 
-func GetNamespacesFromK8sClient() []string {
-	results := []string{}
+func (p *Plugin) getSelectorValuesFromPodName(podName, podNs string) []string {
 
-	client := ConnectK8sClient()
-	if client == nil {
-		return results
+	if podName == "" {
+		return nil
 	}
+	var selectorValues []string
 
-	// get namespaces from k8s api client
-	namespaces, err := client.CoreV1().Namespaces().List(context.Background(), metav1.ListOptions{})
+	pod, err := p.client.CoreV1().Pods(podNs).Get(context.Background(), podName, metav1.GetOptions{})
 	if err != nil {
 		log.Error().Msg(err.Error())
-		return results
-	}
-
-	for _, namespace := range namespaces.Items {
-		if namespace.Status.Phase != "Active" {
-			continue
-		}
-
-		results = append(results, namespace.Name)
-	}
-
-	return results
-}
-
-// ========= //
-// == Pod == //
-// ========= //
-
-func GetPodsFromK8sClient() *v1.PodList {
-
-	client := ConnectK8sClient()
-	if client == nil {
 		return nil
 	}
 
-	// get pods from k8s api client
-	pods, err := client.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{})
-	if err != nil {
-		log.Error().Msg(err.Error())
-		return &v1.PodList{}
+	if pod.Name == podName {
+		selectorValues = []string{
+			fmt.Sprintf("sa:%s", pod.Spec.ServiceAccountName),
+			fmt.Sprintf("ns:%s", pod.Namespace),
+			fmt.Sprintf("pod-uid:%s", pod.UID),
+			fmt.Sprintf("pod-name:%s", pod.Name),
+		}
+		for k, v := range pod.Labels {
+			selectorValues = append(selectorValues, fmt.Sprintf("pod-label:%s:%s", k, v))
+		}
 	}
-	return pods
+
+	return selectorValues
 }
 
-func SetAnnotationsToPodsInNamespaceK8s(namespace string, annotation map[string]string) error {
-	client := ConnectK8sClient()
-	if client == nil {
-		return errors.New("no client")
+func (p *Plugin) validateServiceAccountToken(token string) []string {
+	var podName string
+
+	result, err := p.client.AuthenticationV1().TokenReviews().Create(context.Background(), &review.TokenReview{
+		Spec: review.TokenReviewSpec{
+			Token: token,
+		},
+	}, metav1.CreateOptions{})
+
+	if err != nil || !result.Status.Authenticated {
+		return nil
 	}
 
-	// get pods from k8s api client
-	pods, err := client.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{})
+	for key, value := range result.Status.User.Extra {
+		if strings.Contains(key, "pod-name") {
+			podName = value[0]
+			break
+		}
+	}
+
+	jwtToken, _, err := new(jwt.Parser).ParseUnverified(token, jwt.MapClaims{})
 	if err != nil {
-		return err
+		return nil
 	}
+	kubernetesMap := jwtToken.Claims.(jwt.MapClaims)["kubernetes.io"].(map[string]interface{})
 
-	for _, pod := range pods.Items {
-		copied := pod.DeepCopy()
-		ann := copied.ObjectMeta.Annotations
-		if ann == nil {
-			ann = make(map[string]string)
-		}
-		for k, v := range annotation {
-			ann[k] = v
-		}
-		copied.SetAnnotations(ann)
-		_, err := client.CoreV1().Pods(copied.ObjectMeta.Namespace).Update(context.Background(), copied, metav1.UpdateOptions{})
-		if err != nil {
-			return err
-		}
-	}
+	podNs := kubernetesMap["namespace"].(string)
 
-	return nil
-}
-
-func SetAnnotationsToPodK8s(podName string, annotation map[string]string) error {
-	client := ConnectK8sClient()
-	if client == nil {
-		return errors.New("no client")
-	}
-
-	// get pods from k8s api client
-	pods, err := client.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{})
-	if err != nil {
-		return err
-	}
-
-	for _, pod := range pods.Items {
-		if pod.Name == podName {
-			copied := pod.DeepCopy()
-			ann := copied.ObjectMeta.Annotations
-			if ann == nil {
-				ann = make(map[string]string)
-			}
-			for k, v := range annotation {
-				ann[k] = v
-			}
-			copied.SetAnnotations(ann)
-			_, err := client.CoreV1().Pods(copied.ObjectMeta.Namespace).Update(context.Background(), copied, metav1.UpdateOptions{})
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
+	return p.getSelectorValuesFromPodName(podName, podNs)
 }

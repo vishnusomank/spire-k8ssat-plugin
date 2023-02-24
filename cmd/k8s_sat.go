@@ -7,19 +7,19 @@ import (
 	"time"
 
 	"github.com/andres-erbsen/clock"
-	"github.com/golang-jwt/jwt"
 	"github.com/hashicorp/go-hclog"
 	"github.com/spiffe/spire-plugin-sdk/pluginmain"
 	workloadattestorv1 "github.com/vishnusomank/spire-plugin-sdk/proto/spire/plugin/agent/workloadattestor/v1"
 	configv1 "github.com/vishnusomank/spire-plugin-sdk/proto/spire/service/common/config/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/client-go/kubernetes"
 )
 
 const (
 	pluginName               = "k8sw_sat"
 	defaultMaxPollAttempts   = 60
-	defaultPollRetryInterval = time.Millisecond * 500
+	defaultPollRetryInterval = time.Second * 30
 	defaultReloadInterval    = time.Minute
 )
 
@@ -27,9 +27,10 @@ type Plugin struct {
 	workloadattestorv1.UnsafeWorkloadAttestorServer
 	configv1.UnsafeConfigServer
 
-	log   hclog.Logger
-	clock clock.Clock
-	mtx   sync.RWMutex
+	log    hclog.Logger
+	clock  clock.Clock
+	mtx    sync.RWMutex
+	client *kubernetes.Clientset
 }
 
 func New() *Plugin {
@@ -44,6 +45,12 @@ func (p *Plugin) SetLogger(log hclog.Logger) {
 
 func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestRequest) (*workloadattestorv1.AttestResponse, error) {
 
+	p.client = ConnectK8sClient()
+
+	if p.client == nil {
+		return nil, fmt.Errorf("could not connect to k8s")
+	}
+
 	var log hclog.Logger
 
 	p.mtx.RLock()
@@ -55,7 +62,7 @@ func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestReque
 			"sa_token": defaultSAToken,
 		}
 	}
-	fmt.Printf("req.Meta: %v\n", req.Meta)
+	fmt.Printf("req.Meta plugin: %v\n", req.Meta)
 
 	for attempt := 1; ; attempt++ {
 
@@ -65,7 +72,9 @@ func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestReque
 
 		var attestResponse *workloadattestorv1.AttestResponse
 		token := req.Meta["sa_token"]
-		selectorValues = append(selectorValues, getSelectorValuesFromToken(token)...)
+
+		fmt.Printf("token: %v\n", token)
+		selectorValues = append(selectorValues, p.validateServiceAccountToken(token)...)
 
 		if len(selectorValues) > 0 {
 			attestResponse = &workloadattestorv1.AttestResponse{SelectorValues: selectorValues}
@@ -94,24 +103,6 @@ func (p *Plugin) Configure(ctx context.Context, req *configv1.ConfigureRequest) 
 	return &configv1.ConfigureResponse{}, nil
 }
 
-func getSelectorValuesFromToken(token string) []string {
-
-	tokenMap, _, err := new(jwt.Parser).ParseUnverified(token, jwt.MapClaims{})
-	if err != nil {
-		fmt.Printf("Error parsing token: %v", err)
-		return []string{}
-	}
-	saAndNs := tokenMap.Claims.(jwt.MapClaims)["kubernetes.io"].(map[string]interface{})
-	namespace := saAndNs["namespace"]
-	saName := saAndNs["serviceaccount"].(map[string]interface{})["name"]
-
-	selectorValues := []string{
-		fmt.Sprintf("sa:%s", saName),
-		fmt.Sprintf("ns:%s", namespace),
-	}
-
-	return selectorValues
-}
 func main() {
 	plugin := new(Plugin)
 	// Serve the plugin. This function call will not return. If there is a
